@@ -25,8 +25,8 @@ claude_opus = { model_name = "claude-3-opus-20240229" }
 claude_sonnet = { model_name = "claude-3-7-sonnet-latest" }
 
 # Google Gemini models
-gemini_flash = { model_name = "gemini/gemini-2.5-flash-preview-05-20" } # gemini-2.5-flash-preview-05-20
-# gemini_flash = { model_name = "gemini/gemini-2.5-pro-preview-06-05" } # { model_name = "claude-4-sonnet-20250514"} # { model_name = "gpt-4.1" } # { model_name = "gemini/gemini-2.5-pro-preview-06-05" } # {model_name = "o3-2025-04-16"} #  { model_name = "claude-3-7-sonnet-latest"} #  { model_name = "gemini/gemini-2.5-flash-preview-05-20" } # gemini-2.5-flash-preview-05-20
+# gemini_flash = { model_name = "gemini/gemini-2.5-flash-preview-05-20" } # gemini-2.5-flash-preview-05-20
+gemini_flash = { model_name = "gemini/gemini-2.5-pro-preview-06-05" } # { model_name = "claude-4-sonnet-20250514"} # { model_name = "gpt-4.1" } # { model_name = "gemini/gemini-2.5-pro-preview-06-05" } # {model_name = "o3-2025-04-16"} #  { model_name = "claude-3-7-sonnet-latest"} #  { model_name = "gemini/gemini-2.5-flash-preview-05-20" } # gemini-2.5-flash-preview-05-20
 # gemini_flash = { model_name = "groq/meta-llama/llama-4-maverick-17b-128e-instruct"}
 
 # Ollama models (modify api_base based on your deployment)
@@ -45,7 +45,7 @@ azure_embedding = { model_name = "text-embedding-ada-002", api_base = "YOUR_AZUR
 #### Component configurations ####
 
 [agent]
-model = "claude_sonnet" # Model for the agent logic
+model = "gemini_flash" # Model for the agent logic
 
 [completion]
 model = "ollama_qwen_vision" #"openai_gpt4o"  # Reference to a key in registered_models
@@ -54,6 +54,13 @@ default_temperature = 0.3
 
 [database]
 provider = "postgres"
+# Connection settings will be loaded from environment variables
+host = "${POSTGRES_HOST}"
+port = ${POSTGRES_PORT}
+database = "${POSTGRES_DB}"
+user = "${POSTGRES_USER}"
+password = "${POSTGRES_PASSWORD}"
+
 # Connection pool settings
 pool_size = 10           # Maximum number of connections in the pool
 max_overflow = 15        # Maximum number of connections that can be created beyond pool_size
@@ -110,15 +117,15 @@ batch_size = 4096
 
 [morphik]
 enable_colpali = true
-mode = "self_hosted" # "cloud"  # "cloud" or "self_hosted"
-api_domain = "api.morphik.ai"  # API domain for cloud URIs
+mode = "${MORPHIK_MODE:-self_hosted}"  # "cloud" or "self_hosted"
+api_domain = "${MORPHIK_API_DOMAIN}"  # API domain for cloud URIs
 # Only call the embedding API if colpali_mode is "api"
-morphik_embedding_api_domain = "http://localhost:6000"  # endpoint for multivector embedding service
-colpali_mode = "local" # "off", "local", or "api"
+morphik_embedding_api_domain = "${MORPHIK_EMBEDDING_API_DOMAIN}"  # endpoint for multivector embedding service
+colpali_mode = "${COLPALI_MODE:-local}" # "off", "local", or "api"
 
 
 [pdf_viewer]
-frontend_url = "http://localhost:3000/api/pdf" # "https://morphik.ai/api/pdf" # "http://localhost:3000/api/pdf" # "https://morphik.ai/api/pdf"
+frontend_url = "${PDF_VIEWER_URL}"  # URL for the PDF viewer frontend
 
 [graph]
 model = "openai_gpt4-1-mini"
@@ -132,6 +139,7 @@ enable_entity_resolution = true
 [telemetry]
 enabled = true
 honeycomb_enabled = true
+honeycomb_api_key = "${HONEYCOMB_API_KEY}"
 honeycomb_endpoint = "https://api.honeycomb.io"
 honeycomb_proxy_endpoint = "https://otel-proxy.onrender.com"
 service_name = "databridge-core-hosted"
