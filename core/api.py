@@ -748,6 +748,8 @@ async def list_documents(
         system_filters["end_user_id"] = end_user_id
     if auth.app_id:
         system_filters["app_id"] = auth.app_id
+    if auth.organization_id:
+        system_filters["organization_id"] = auth.organization_id
 
     return await document_service.db.get_documents(auth, skip, limit, filters, system_filters)
 
@@ -764,7 +766,7 @@ async def get_document(document_id: str, auth: AuthContext = Depends(verify_toke
         The :class:`Document` metadata if found.
     """
     try:
-        doc = await document_service.db.get_document(document_id, auth)
+        doc = await document_service.db.get_document(document_id, auth, organization_id=auth.organization_id)
         logger.debug(f"Found document: {doc}")
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -787,7 +789,7 @@ async def get_document_status(document_id: str, auth: AuthContext = Depends(veri
         Dict containing status information for the document
     """
     try:
-        doc = await document_service.db.get_document(document_id, auth)
+        doc = await document_service.db.get_document(document_id, auth, organization_id=auth.organization_id)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
@@ -833,7 +835,7 @@ async def delete_document(document_id: str, auth: AuthContext = Depends(verify_t
         Deletion status
     """
     try:
-        success = await document_service.delete_document(document_id, auth)
+        success = await document_service.delete_document(document_id, auth, organization_id=auth.organization_id)
         if not success:
             raise HTTPException(status_code=404, detail="Document not found or delete failed")
         return {"status": "success", "message": f"Document {document_id} deleted successfully"}
@@ -868,6 +870,8 @@ async def get_document_by_filename(
             system_filters["folder_name"] = normalized_folder_name
         if end_user_id:
             system_filters["end_user_id"] = end_user_id
+        if auth.organization_id:
+            system_filters["organization_id"] = auth.organization_id
 
         doc = await document_service.db.get_document_by_filename(filename, auth, system_filters)
         logger.debug(f"Found document by filename: {doc}")
@@ -898,7 +902,7 @@ async def get_document_download_url(
     """
     try:
         # Get the document
-        doc = await document_service.db.get_document(document_id, auth)
+        doc = await document_service.db.get_document(document_id, auth, organization_id=auth.organization_id)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
@@ -944,7 +948,7 @@ async def download_document_file(document_id: str, auth: AuthContext = Depends(v
         logger.info(f"Auth context: entity_id={auth.entity_id}, app_id={auth.app_id}")
 
         # Get the document
-        doc = await document_service.db.get_document(document_id, auth)
+        doc = await document_service.db.get_document(document_id, auth, organization_id=auth.organization_id)
         logger.info(f"Document lookup result: {doc is not None}")
 
         if not doc:
@@ -1022,6 +1026,7 @@ async def update_document_text(
             rules=request.rules,
             update_strategy=update_strategy,
             use_colpali=request.use_colpali,
+            organization_id=auth.organization_id,
         )
 
         if not doc:
@@ -1072,6 +1077,7 @@ async def update_document_file(
             rules=rules_list,
             update_strategy=update_strategy,
             use_colpali=use_colpali,
+            organization_id=auth.organization_id,
         )
 
         if not doc:
@@ -1114,6 +1120,7 @@ async def update_document_metadata(
             rules=[],
             update_strategy="add",
             use_colpali=None,
+            organization_id=auth.organization_id,
         )
 
         if not doc:
@@ -1370,6 +1377,8 @@ async def create_graph(
         # Developer tokens: always scope by app_id to prevent cross-app leakage
         if auth.app_id:
             system_filters["app_id"] = auth.app_id
+        if auth.organization_id:
+            system_filters["organization_id"] = auth.organization_id
 
         # --------------------
         # Create stub graph
@@ -1402,6 +1411,8 @@ async def create_graph(
             graph_stub.system_metadata["end_user_id"] = system_filters["end_user_id"]
         if auth.app_id:
             graph_stub.system_metadata["app_id"] = auth.app_id
+        if auth.organization_id: # Add organization_id to graph_stub
+            graph_stub.system_metadata["organization_id"] = auth.organization_id
 
         # Mark graph as processing
         graph_stub.system_metadata["status"] = "processing"
@@ -1409,6 +1420,7 @@ async def create_graph(
         graph_stub.system_metadata["updated_at"] = datetime.now(UTC)
 
         # Store the stub graph so clients can poll for status
+        # Assuming store_graph will also handle/receive organization_id if needed through auth or system_filters on stub
         success = await document_service.db.store_graph(graph_stub)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to create graph stub")
@@ -1498,8 +1510,12 @@ async def create_folder(
         if auth.app_id:
             folder.system_metadata["app_id"] = auth.app_id
 
+        # Scope folder to the organization ID if available
+        if auth.organization_id:
+            folder.system_metadata["organization_id"] = auth.organization_id
+
         # Store in database
-        success = await document_service.db.create_folder(folder)
+        success = await document_service.db.create_folder(folder, organization_id=auth.organization_id)
 
         if not success:
             raise HTTPException(status_code=500, detail="Failed to create folder")
@@ -1525,7 +1541,7 @@ async def list_folders(
         List[Folder]: List of folders
     """
     try:
-        folders = await document_service.db.list_folders(auth)
+        folders = await document_service.db.list_folders(auth, organization_id=auth.organization_id)
         return folders
     except Exception as e:
         logger.error(f"Error listing folders: {e}")
@@ -1538,7 +1554,7 @@ async def list_folder_summaries(auth: AuthContext = Depends(verify_token)) -> Li
     """Return compact folder list (id, name, doc_count, updated_at)."""
 
     try:
-        summaries = await document_service.db.list_folders_summary(auth)
+        summaries = await document_service.db.list_folders_summary(auth, organization_id=auth.organization_id)
         return summaries  # type: ignore[return-value]
     except Exception as exc:  # noqa: BLE001
         logger.error("Error listing folder summaries: %s", exc)
@@ -1562,7 +1578,7 @@ async def get_folder(
         Folder: Folder if found and accessible
     """
     try:
-        folder = await document_service.db.get_folder(folder_id, auth)
+        folder = await document_service.db.get_folder(folder_id, auth, organization_id=auth.organization_id)
 
         if not folder:
             raise HTTPException(status_code=404, detail=f"Folder {folder_id} not found")
@@ -1592,7 +1608,7 @@ async def delete_folder(
         Deletion status
     """
     try:
-        folder = await document_service.db.get_folder_by_name(folder_name, auth)
+        folder = await document_service.db.get_folder_by_name(folder_name, auth, organization_id=auth.organization_id)
         folder_id = folder.id
         if not folder:
             raise HTTPException(status_code=404, detail="Folder not found")
@@ -1618,7 +1634,7 @@ async def delete_folder(
 
         db: PostgresDatabase = document_service.db
         # just remove the folder too now.
-        status = await db.delete_folder(folder_id, auth)
+        status = await db.delete_folder(folder_id, auth, organization_id=auth.organization_id)
         if not status:
             logger.error(f"Failed to delete folder {folder_id}")
             raise HTTPException(status_code=500, detail=f"Failed to delete folder {folder_id}")
@@ -1649,7 +1665,7 @@ async def add_document_to_folder(
         Success status
     """
     try:
-        success = await document_service.db.add_document_to_folder(folder_id, document_id, auth)
+        success = await document_service.db.add_document_to_folder(folder_id, document_id, auth, organization_id=auth.organization_id)
 
         if not success:
             raise HTTPException(status_code=500, detail="Failed to add document to folder")
@@ -1681,7 +1697,7 @@ async def remove_document_from_folder(
         Success status
     """
     try:
-        success = await document_service.db.remove_document_from_folder(folder_id, document_id, auth)
+        success = await document_service.db.remove_document_from_folder(folder_id, document_id, auth, organization_id=auth.organization_id)
 
         if not success:
             raise HTTPException(status_code=500, detail="Failed to remove document from folder")
@@ -1726,6 +1742,8 @@ async def get_graph(
         # Developer tokens: always scope by app_id to prevent cross-app leakage
         if auth.app_id:
             system_filters["app_id"] = auth.app_id
+        if auth.organization_id:
+            system_filters["organization_id"] = auth.organization_id
 
         graph = await document_service.db.get_graph(name, auth, system_filters)
         if not graph:
@@ -1769,6 +1787,8 @@ async def list_graphs(
         # Developer tokens: always scope by app_id to prevent cross-app leakage
         if auth.app_id:
             system_filters["app_id"] = auth.app_id
+        if auth.organization_id:
+            system_filters["organization_id"] = auth.organization_id
 
         return await document_service.db.list_graphs(auth, system_filters)
     except PermissionError as e:
@@ -1806,6 +1826,7 @@ async def get_graph_visualization(
             auth=auth,
             folder_name=folder_name,
             end_user_id=end_user_id,
+            organization_id=auth.organization_id,
         )
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -1856,6 +1877,8 @@ async def update_graph(
         # Developer tokens: always scope by app_id to prevent cross-app leakage
         if auth.app_id:
             system_filters["app_id"] = auth.app_id
+        if auth.organization_id:
+            system_filters["organization_id"] = auth.organization_id
 
         return await document_service.update_graph(
             name=name,
@@ -2099,7 +2122,7 @@ async def set_folder_rule(
                     logger.debug(f"    Schema: {field_config['schema']}")
 
         # Get the folder
-        folder = await document_service.db.get_folder(folder_id, auth)
+        folder = await document_service.db.get_folder(folder_id, auth, organization_id=auth.organization_id)
         if not folder:
             raise HTTPException(status_code=404, detail=f"Folder {folder_id} not found")
 
@@ -2129,7 +2152,7 @@ async def set_folder_rule(
         logger.info(f"Successfully updated folder {folder_id} with {len(request.rules)} rules")
 
         # Get updated folder
-        updated_folder = await document_service.db.get_folder(folder_id, auth)
+        updated_folder = await document_service.db.get_folder(folder_id, auth, organization_id=auth.organization_id)
 
         # If apply_to_existing is True, apply these rules to all existing documents in the folder
         processing_results = {"processed": 0, "errors": []}

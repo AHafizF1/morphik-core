@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 from logging import getLogger
 
 import jwt
+from clerk_sdk import Clerk, ClerkAPIException
+from clerk_sdk.jwt import JWT
 from fastapi import Header, HTTPException
 
 from core.config import get_settings
@@ -13,6 +15,9 @@ __all__ = ["verify_token"]
 
 # Load settings once at import time
 settings = get_settings()
+
+# Initialize Clerk SDK
+clerk_client = Clerk(secret_key=settings.CLERK_SECRET_KEY)
 
 
 async def verify_token(authorization: str = Header(None)) -> AuthContext:  # noqa: D401 – FastAPI dependency
@@ -32,6 +37,7 @@ async def verify_token(authorization: str = Header(None)) -> AuthContext:  # noq
             entity_id=settings.dev_entity_id,
             permissions=set(settings.dev_permissions),
             user_id=settings.dev_entity_id,  # In dev mode, entity_id == user_id
+            organization_id=None, # No org in dev mode for now
         )
 
     # ------------------------------------------------------------------
@@ -51,26 +57,35 @@ async def verify_token(authorization: str = Header(None)) -> AuthContext:  # noq
     token = authorization[7:]  # Strip "Bearer " prefix
 
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-    except jwt.InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        # Verify the token using Clerk SDK
+        # This automatically checks expiry, signature, etc.
+        # We can also pass `issuer` or `audience` if needed for more strict validation
+        verified_token_claims = clerk_client.verify_token(token=token)
 
-    # Check expiry manually – jwt.decode does *not* enforce expiry on psycopg2.
-    if datetime.fromtimestamp(payload["exp"], UTC) < datetime.now(UTC):
-        raise HTTPException(status_code=401, detail="Token expired")
+        user_id = verified_token_claims.get("sub")
+        if not user_id:
+            logger.error("Clerk token missing 'sub' (user_id) claim.")
+            raise HTTPException(status_code=401, detail="Invalid token: Missing user identifier")
 
-    # Support both legacy "type" and new "entity_type" fields
-    entity_type_field = payload.get("type") or payload.get("entity_type")
-    if entity_type_field is None:
-        raise HTTPException(status_code=401, detail="Missing entity type in token")
+        organization_id = verified_token_claims.get("org_id") # This might be specific to your Clerk setup
 
-    ctx = AuthContext(
-        entity_type=EntityType(entity_type_field),
-        entity_id=payload["entity_id"],
-        app_id=payload.get("app_id"),
-        permissions=set(payload.get("permissions", ["read"])),
-        user_id=payload.get("user_id", payload["entity_id"]),
-    )
+        # Assuming entity_type is USER when using Clerk.
+        # Permissions and app_id might need different handling with Clerk.
+        ctx = AuthContext(
+            entity_type=EntityType.USER,
+            entity_id=user_id, # Clerk's user_id ('sub') maps to entity_id
+            user_id=user_id,
+            organization_id=organization_id,
+            app_id=None, # Or derive from token if available/needed
+            permissions={"read", "write"}, # Default permissions for Clerk users
+        )
+    except ClerkAPIException as exc:
+        logger.error(f"Clerk token verification failed: {exc}")
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc.errors[0].long_message if exc.errors else str(exc)}") from exc
+    except Exception as exc: # Catch any other unexpected errors during token processing
+        logger.error(f"Unexpected error during token verification: {exc}")
+        raise HTTPException(status_code=500, detail="Token processing error")
+
 
     # ------------------------------------------------------------------
     # Enterprise enhancement – swap database & vector store based on app_id

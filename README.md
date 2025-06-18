@@ -36,6 +36,7 @@ The best part? Morphik has a [free tier](https://www.morphik.ai/pricing) and is 
 - [Using Morphik](#using-morphik)
 - [Contributing](#contributing)
 - [Open source vs paid](#open-source-vs-paid)
+- [Authentication](#authentication)
 
 ## Getting Started with Morphik (Recommended)
 
@@ -50,6 +51,14 @@ If you'd like to self-host Morphik, you can find the dedicated instruction [here
 ## Using Morphik
 
 Once you've signed up for Morphik, you can get started with ingesting and searching your data right away.
+
+### Authentication
+
+Morphik-Core supports JWT-based authentication. For production and advanced user management, it can be integrated with [Clerk](https://clerk.com/). This allows for features like social sign-on, organization management, and robust data scoping based on organization ID.
+
+For detailed setup instructions, see the [Clerk Authentication Guide](./docs/clerk_auth.md).
+
+The default setup also includes a `dev_mode` for local development which bypasses external authentication requirements.
 
 
 ### Code (Example: Python SDK)

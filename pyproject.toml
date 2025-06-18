@@ -12,6 +12,7 @@ dependencies = [
     "asyncpg>=0.30.0",
     "boto3>=1.38.14",
     "build>=1.2.2.post1",
+    "clerk-sdk-python>=0.6.0", # TODO: Check for latest version
     "dotenv>=0.9.9",
     "fastapi>=0.115.12",
     "filetype>=1.2.0",

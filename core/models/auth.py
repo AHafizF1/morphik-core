@@ -18,3 +18,4 @@ class AuthContext(BaseModel):
     # TODO: remove permissions, not required here.
     permissions: Set[str] = {"read"}
     user_id: Optional[str] = None  # ID of the user who owns the app/entity
+    organization_id: Optional[str] = None # ID of the organization the user belongs to

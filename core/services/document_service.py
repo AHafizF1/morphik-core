@@ -57,15 +57,17 @@ settings = get_settings()
 
 class DocumentService:
     async def _ensure_folder_exists(
-        self, folder_name: Union[str, List[str]], document_id: str, auth: AuthContext
+        self, folder_name: Union[str, List[str]], document_id: str, auth: AuthContext, organization_id: Optional[str] = None
     ) -> Optional[Folder]:
         """
         Check if a folder exists, if not create it. Also adds the document to the folder.
+        Optionally scoped by organization_id.
 
         Args:
             folder_name: Name of the folder
             document_id: ID of the document to add to the folder
             auth: Authentication context
+            organization_id: Optional organization ID
 
         Returns:
             Folder object if found or created, None on error
@@ -75,21 +77,22 @@ class DocumentService:
             if isinstance(folder_name, list):
                 last_folder = None
                 for fname in folder_name:
-                    last_folder = await self._ensure_folder_exists(fname, document_id, auth)
+                    # Propagate organization_id
+                    last_folder = await self._ensure_folder_exists(fname, document_id, auth, organization_id)
                 return last_folder
 
-            # First check if the folder already exists
-            folder = await self.db.get_folder_by_name(folder_name, auth)
+            # First check if the folder already exists (scoped by organization_id)
+            folder = await self.db.get_folder_by_name(folder_name, auth, organization_id=organization_id)
             if folder:
-                # Add document to existing folder
+                # Add document to existing folder (scoped by organization_id)
                 if document_id not in folder.document_ids:
-                    success = await self.db.add_document_to_folder(folder.id, document_id, auth)
+                    success = await self.db.add_document_to_folder(folder.id, document_id, auth, organization_id=organization_id)
                     if not success:
-                        logger.warning(f"Failed to add document {document_id} to existing folder {folder.name}")
+                        logger.warning(f"Failed to add document {document_id} to existing folder {folder.name} (org: {organization_id})")
                 return folder  # Folder already exists
 
             # Create a new folder
-            folder = Folder(
+            new_folder_obj = Folder( # Renamed to new_folder_obj to avoid confusion with outer scope 'folder' variable
                 name=folder_name,
                 owner={
                     "type": auth.entity_type.value,
@@ -100,9 +103,15 @@ class DocumentService:
 
             # Scope folder to the application ID for developer tokens
             if auth.app_id:
-                folder.system_metadata["app_id"] = auth.app_id
+                new_folder_obj.system_metadata["app_id"] = auth.app_id
+            # Scope folder to organization ID if provided
+            if organization_id:
+                new_folder_obj.system_metadata["organization_id"] = organization_id
 
-            await self.db.create_folder(folder)
+            await self.db.create_folder(new_folder_obj, organization_id=organization_id)
+            # Return the created folder object, which now includes an ID and potentially updated system_metadata
+            # Re-fetch to ensure we have the ID and any DB-side defaults
+            return await self.db.get_folder_by_name(folder_name, auth, organization_id=organization_id)
             return folder
 
         except Exception as e:
@@ -214,8 +223,10 @@ class DocumentService:
             system_filters["folder_name"] = folder_name
         if end_user_id:
             system_filters["end_user_id"] = end_user_id
-        if auth.app_id:
+        if auth.app_id: # app_id from AuthContext
             system_filters["app_id"] = auth.app_id
+        if auth.organization_id: # organization_id from AuthContext for filtering
+            system_filters["organization_id"] = auth.organization_id
 
         # Launch embedding queries concurrently
         embedding_tasks = [self.embedding_model.embed_for_query(query)]
@@ -332,7 +343,7 @@ class DocumentService:
         else:
             result_creation_start = time.time()
 
-        results = await self._create_chunk_results(auth, chunks)
+        results = await self._create_chunk_results(auth, chunks, organization_id=auth.organization_id)
 
         if not perf_tracker:
             phase_times["result_creation"] = time.time() - result_creation_start
@@ -436,10 +447,10 @@ class DocumentService:
         """Retrieve relevant documents."""
         # Get chunks first
         chunks = await self.retrieve_chunks(
-            query, auth, filters, k, min_score, use_reranking, use_colpali, folder_name, end_user_id
+            query, auth, filters, k, min_score, use_reranking, use_colpali, folder_name, end_user_id # org_id passed via auth context to retrieve_chunks
         )
         # Convert to document results
-        results = await self._create_document_results(auth, chunks)
+        results = await self._create_document_results(auth, chunks, organization_id=auth.organization_id) # Pass org_id here too
         documents = list(results.values())
         logger.info(f"Returning {len(documents)} document results")
         return documents
@@ -470,12 +481,16 @@ class DocumentService:
             system_filters["folder_name"] = folder_name
         if end_user_id:
             system_filters["end_user_id"] = end_user_id
-        if auth.app_id:
+        if auth.app_id: # app_id from AuthContext
             system_filters["app_id"] = auth.app_id
+        if auth.organization_id: # organization_id from AuthContext for filtering
+             system_filters["organization_id"] = auth.organization_id
 
         # Use the database's batch retrieval method
+        # Note: get_documents_by_id in postgres_database.py was not modified to take organization_id directly,
+        # it relies on it being in system_filters.
         documents = await self.db.get_documents_by_id(document_ids, auth, system_filters)
-        logger.info(f"Batch retrieved {len(documents)} documents out of {len(document_ids)} requested")
+        logger.info(f"Batch retrieved {len(documents)} documents out of {len(document_ids)} requested (org: {auth.organization_id})")
         return documents
 
     async def batch_retrieve_chunks(
@@ -505,11 +520,12 @@ class DocumentService:
         # Collect unique document IDs to check authorization in a single query
         doc_ids = list({source.document_id for source in chunk_ids})
 
-        # Find authorized documents in a single query
+        # Find authorized documents in a single query (passing auth, which now contains organization_id)
         authorized_docs = await self.batch_retrieve_documents(doc_ids, auth, folder_name, end_user_id)
         authorized_doc_ids = {doc.external_id for doc in authorized_docs}
 
         # Filter sources to only include authorized documents
+        # This implicitly handles organization scoping as authorized_docs are already org-scoped
         authorized_sources = [source for source in chunk_ids if source.document_id in authorized_doc_ids]
 
         if not authorized_sources:
@@ -582,8 +598,8 @@ class DocumentService:
         logger.debug(f"Sorted {len(chunks)} chunks by score")
 
         # Convert to chunk results
-        results = await self._create_chunk_results(auth, chunks)
-        logger.info(f"Batch retrieved {len(results)} chunks out of {len(chunk_ids)} requested")
+        results = await self._create_chunk_results(auth, chunks, organization_id=auth.organization_id)
+        logger.info(f"Batch retrieved {len(results)} chunks out of {len(chunk_ids)} requested (org: {auth.organization_id})")
         return results
 
     async def query(
@@ -676,6 +692,7 @@ class DocumentService:
         else:
             chunk_retrieval_start = time.time()
 
+        # retrieve_chunks will use auth.organization_id from the AuthContext
         chunks = await self.retrieve_chunks(
             query, auth, filters, k, min_score, use_reranking, use_colpali, folder_name, end_user_id, perf_tracker
         )
@@ -689,7 +706,8 @@ class DocumentService:
         else:
             doc_results_start = time.time()
 
-        documents = await self._create_document_results(auth, chunks)
+        # _create_document_results will use auth.organization_id
+        documents = await self._create_document_results(auth, chunks, organization_id=auth.organization_id)
 
         if not perf_tracker:
             phase_times["document_results_creation"] = time.time() - doc_results_start
@@ -814,10 +832,12 @@ class DocumentService:
 
         # Always add folder_name to system_metadata (None if not provided)
         doc.system_metadata["folder_name"] = folder_name
+        if auth.organization_id: # Add organization_id to system_metadata
+            doc.system_metadata["organization_id"] = auth.organization_id
 
         # Check if the folder exists, if not create it (only when folder_name is provided)
         if folder_name:
-            await self._ensure_folder_exists(folder_name, doc.external_id, auth)
+            await self._ensure_folder_exists(folder_name, doc.external_id, auth, organization_id=auth.organization_id)
 
         if end_user_id:
             doc.system_metadata["end_user_id"] = end_user_id
@@ -924,10 +944,14 @@ class DocumentService:
         # This matches the behavior in ingestion_worker.py
         doc.system_metadata["status"] = "completed"
         doc.system_metadata["updated_at"] = datetime.now(UTC)
+        # Pass organization_id to update_document
         await self.db.update_document(
-            document_id=doc.external_id, updates={"system_metadata": doc.system_metadata}, auth=auth
+            document_id=doc.external_id,
+            updates={"system_metadata": doc.system_metadata},
+            auth=auth,
+            organization_id=auth.organization_id
         )
-        logger.debug(f"Updated document status to 'completed' for {doc.external_id}")
+        logger.debug(f"Updated document status to 'completed' for {doc.external_id} (org: {auth.organization_id})")
 
         # Determine the final page count for usage recording
         colpali_count_for_limit_fn = (
@@ -1004,6 +1028,8 @@ class DocumentService:
 
         if auth.app_id:
             doc.system_metadata["app_id"] = auth.app_id
+        if auth.organization_id: # Add organization_id to system_metadata
+            doc.system_metadata["organization_id"] = auth.organization_id
         if end_user_id:
             doc.system_metadata["end_user_id"] = end_user_id
         # folder_name is handled later by _ensure_folder_exists if needed by background worker
@@ -1074,10 +1100,11 @@ class DocumentService:
                     "storage_files": [sf.model_dump() for sf in doc.storage_files],  # Dumps SFI, version is int
                     "system_metadata": doc.system_metadata,  # system_metadata already has status processing
                 },
-                auth=auth,
+                auth=auth, # organization_id is implicitly part of auth context for db.update_document if needed by its signature
+                organization_id=auth.organization_id # Explicitly pass organization_id
             )
             logger.info(
-                "File %s (doc_id: %s) uploaded to storage at %s/%s and DB updated.",
+                "File %s (doc_id: %s) uploaded to storage at %s/%s and DB updated (org: %s).",
                 filename,
                 doc.external_id,
                 bucket_name,
@@ -1108,11 +1135,12 @@ class DocumentService:
         # 3. Ensure folder exists if folder_name is provided (after doc is created)
         if folder_name:
             try:
-                await self._ensure_folder_exists(folder_name, doc.external_id, auth)
-                logger.debug(f"Ensured folder '{folder_name}' exists " f"and contains document {doc.external_id}")
+                # Pass organization_id to _ensure_folder_exists
+                await self._ensure_folder_exists(folder_name, doc.external_id, auth, organization_id=auth.organization_id)
+                logger.debug(f"Ensured folder '{folder_name}' (org: {auth.organization_id}) exists " f"and contains document {doc.external_id}")
             except Exception as e:
                 logger.error(
-                    f"Error during _ensure_folder_exists for doc {doc.external_id}"
+                    f"Error during _ensure_folder_exists for doc {doc.external_id} (org: {auth.organization_id})"
                     f"in folder {folder_name}: {e}. Continuing."
                 )
 
@@ -1123,6 +1151,7 @@ class DocumentService:
             "app_id": auth.app_id,
             "permissions": list(auth.permissions),
             "user_id": auth.user_id,
+            "organization_id": auth.organization_id, # Add organization_id to auth_dict for the background job
         }
 
         metadata_json_str = json.dumps(metadata or {})
@@ -1499,8 +1528,8 @@ class DocumentService:
         logger.debug(f"Chunk IDs stored: {doc.chunk_ids}")
         return doc.chunk_ids
 
-    async def _create_chunk_results(self, auth: AuthContext, chunks: List[DocumentChunk]) -> List[ChunkResult]:
-        """Create ChunkResult objects with document metadata."""
+    async def _create_chunk_results(self, auth: AuthContext, chunks: List[DocumentChunk], organization_id: Optional[str] = None) -> List[ChunkResult]:
+        """Create ChunkResult objects with document metadata, optionally scoped by organization_id."""
         results = []
         if not chunks:
             logger.info("No chunks provided, returning empty results")
@@ -1510,7 +1539,10 @@ class DocumentService:
         unique_doc_ids = list({chunk.document_id for chunk in chunks})
 
         # Fetch all required documents in a single batch query
-        docs = await self.batch_retrieve_documents(unique_doc_ids, auth)
+        # Batch retrieve documents will use auth.organization_id if it's part of AuthContext and handled by batch_retrieve_documents
+        # or pass organization_id if its signature supports it.
+        # Assuming batch_retrieve_documents is now org-aware via AuthContext or direct param.
+        docs = await self.batch_retrieve_documents(unique_doc_ids, auth) # auth already contains org_id
 
         # Create a lookup dictionary of documents by ID
         doc_map = {doc.external_id: doc for doc in docs}
@@ -1550,8 +1582,8 @@ class DocumentService:
         logger.info(f"Created {len(results)} chunk results")
         return results
 
-    async def _create_document_results(self, auth: AuthContext, chunks: List[ChunkResult]) -> Dict[str, DocumentResult]:
-        """Group chunks by document and create DocumentResult objects."""
+    async def _create_document_results(self, auth: AuthContext, chunks: List[ChunkResult], organization_id: Optional[str] = None) -> Dict[str, DocumentResult]:
+        """Group chunks by document and create DocumentResult objects, optionally scoped by organization_id."""
         if not chunks:
             logger.info("No chunks provided, returning empty results")
             return {}
@@ -1567,7 +1599,8 @@ class DocumentService:
         unique_doc_ids = list(doc_chunks.keys())
 
         # Fetch all documents in a single batch query
-        docs = await self.batch_retrieve_documents(unique_doc_ids, auth)
+        # Assuming batch_retrieve_documents is now org-aware via AuthContext or direct param.
+        docs = await self.batch_retrieve_documents(unique_doc_ids, auth) # auth already contains org_id
 
         # Create a lookup dictionary of documents by ID
         doc_map = {doc.external_id: doc for doc in docs}
@@ -1719,8 +1752,8 @@ class DocumentService:
         Returns:
             Updated document if successful, None if failed
         """
-        # Validate permissions and get document
-        doc = await self._validate_update_access(document_id, auth)
+        # Validate permissions and get document (pass organization_id)
+        doc = await self._validate_update_access(document_id, auth, organization_id=auth.organization_id)
         if not doc:
             return None
 
@@ -1824,21 +1857,22 @@ class DocumentService:
 
         return doc
 
-    async def _validate_update_access(self, document_id: str, auth: AuthContext) -> Optional[Document]:
-        """Validate user permissions and document access."""
+    async def _validate_update_access(self, document_id: str, auth: AuthContext, organization_id: Optional[str] = None) -> Optional[Document]:
+        """Validate user permissions and document access, optionally scoped by organization_id."""
         if "write" not in auth.permissions:
             logger.error(f"User {auth.entity_id} does not have write permission")
             raise PermissionError("User does not have write permission")
 
-        # Check if document exists and user has write access
-        doc = await self.db.get_document(document_id, auth)
+        # Check if document exists and user has write access (scoped by organization_id)
+        doc = await self.db.get_document(document_id, auth, organization_id=organization_id)
         if not doc:
-            logger.error(f"Document {document_id} not found or not accessible")
+            logger.error(f"Document {document_id} (org: {organization_id}) not found or not accessible")
             return None
 
-        if not await self.db.check_access(document_id, auth, "write"):
-            logger.error(f"User {auth.entity_id} does not have write permission for document {document_id}")
-            raise PermissionError(f"User does not have write permission for document {document_id}")
+        # check_access in db layer was also updated to take organization_id
+        if not await self.db.check_access(document_id, auth, "write", organization_id=organization_id):
+            logger.error(f"User {auth.entity_id} does not have write permission for document {document_id} (org: {organization_id})")
+            raise PermissionError(f"User does not have write permission for document {document_id} (org: {organization_id})")
 
         return doc
 
@@ -1990,11 +2024,11 @@ class DocumentService:
             logger.warning(f"Unknown update strategy '{update_strategy}', defaulting to 'add'")
             return current_content + "\n\n" + update_content
 
-    async def _update_document_metadata_only(self, doc: Document, auth: AuthContext) -> Optional[Document]:
-        """Update document metadata without reprocessing chunks."""
+    async def _update_document_metadata_only(self, doc: Document, auth: AuthContext, organization_id: Optional[str] = None) -> Optional[Document]:
+        """Update document metadata without reprocessing chunks, optionally scoped by organization_id."""
         updates = {
             "metadata": doc.metadata,
-            "system_metadata": doc.system_metadata,
+            "system_metadata": doc.system_metadata, # org_id should be in here if set
             "filename": doc.filename,
             "storage_files": doc.storage_files if hasattr(doc, "storage_files") else None,
             "storage_info": doc.storage_info if hasattr(doc, "storage_info") else None,
@@ -2002,12 +2036,12 @@ class DocumentService:
         # Remove None values
         updates = {k: v for k, v in updates.items() if v is not None}
 
-        success = await self.db.update_document(doc.external_id, updates, auth)
+        success = await self.db.update_document(doc.external_id, updates, auth, organization_id=organization_id)
         if not success:
-            logger.error(f"Failed to update document {doc.external_id} metadata")
+            logger.error(f"Failed to update document {doc.external_id} (org: {organization_id}) metadata")
             return None
 
-        logger.info(f"Successfully updated document metadata for {doc.external_id}")
+        logger.info(f"Successfully updated document metadata for {doc.external_id} (org: {organization_id})")
         return doc
 
     async def _process_chunks_and_embeddings(
@@ -2119,15 +2153,20 @@ class DocumentService:
         Returns:
             Graph: The created graph
         """
-        # Delegate to the GraphService
+        # Delegate to the GraphService, pass organization_id if graph_service.create_graph supports it
+        # For now, organization_id is part of auth and system_filters
+        effective_system_filters = dict(system_filters or {})
+        if auth.organization_id and "organization_id" not in effective_system_filters:
+             effective_system_filters["organization_id"] = auth.organization_id
+
         return await self.graph_service.create_graph(
             name=name,
-            auth=auth,
+            auth=auth, # auth contains organization_id
             document_service=self,
             filters=filters,
             documents=documents,
             prompt_overrides=prompt_overrides,
-            system_filters=system_filters,
+            system_filters=effective_system_filters, # system_filters now contains organization_id
         )
 
     async def update_graph(
@@ -2157,21 +2196,26 @@ class DocumentService:
         Returns:
             Graph: The updated graph
         """
-        # Delegate to the GraphService
+        # Delegate to the GraphService, pass organization_id if graph_service.update_graph supports it
+        # For now, organization_id is part of auth and system_filters
+        effective_system_filters = dict(system_filters or {})
+        if auth.organization_id and "organization_id" not in effective_system_filters:
+            effective_system_filters["organization_id"] = auth.organization_id
+
         return await self.graph_service.update_graph(
             name=name,
-            auth=auth,
+            auth=auth, # auth contains organization_id
             document_service=self,
             additional_filters=additional_filters,
             additional_documents=additional_documents,
             prompt_overrides=prompt_overrides,
-            system_filters=system_filters,
+            system_filters=effective_system_filters, # system_filters now contains organization_id
             is_initial_build=is_initial_build,  # Pass through
         )
 
-    async def delete_document(self, document_id: str, auth: AuthContext) -> bool:
+    async def delete_document(self, document_id: str, auth: AuthContext, organization_id: Optional[str] = None) -> bool:
         """
-        Delete a document and all its associated data.
+        Delete a document and all its associated data, optionally scoped by organization_id.
 
         This method:
         1. Checks if the user has write access to the document
@@ -2190,23 +2234,23 @@ class DocumentService:
         Raises:
             PermissionError: If the user doesn't have write access
         """
-        # First get the document to retrieve its chunk IDs
-        document = await self.db.get_document(document_id, auth)
+        # First get the document to retrieve its chunk IDs (and verify org scope)
+        document = await self.db.get_document(document_id, auth, organization_id=organization_id)
 
         if not document:
-            logger.error(f"Document {document_id} not found")
+            logger.error(f"Document {document_id} (org: {organization_id}) not found or not accessible for deletion.")
             return False
 
-        # Verify write access - the database layer also checks this, but we check here too
-        # to avoid unnecessary operations if the user doesn't have permission
-        if not await self.db.check_access(document_id, auth, "write"):
-            logger.error(f"User {auth.entity_id} doesn't have write access to document {document_id}")
-            raise PermissionError(f"User doesn't have write access to document {document_id}")
+        # Verify write access - the database layer also checks this (and org scope via get_document)
+        # db.check_access was also updated to take organization_id
+        if not await self.db.check_access(document_id, auth, "write", organization_id=organization_id):
+            logger.error(f"User {auth.entity_id} doesn't have write access to document {document_id} (org: {organization_id})")
+            raise PermissionError(f"User doesn't have write access to document {document_id} (org: {organization_id})")
 
-        # Delete document from database
-        db_success = await self.db.delete_document(document_id, auth)
+        # Delete document from database (pass organization_id)
+        db_success = await self.db.delete_document(document_id, auth, organization_id=organization_id)
         if not db_success:
-            logger.error(f"Failed to delete document {document_id} from database")
+            logger.error(f"Failed to delete document {document_id} (org: {organization_id}) from database")
             return False
 
         logger.info(f"Deleted document {document_id} from database")
@@ -2368,10 +2412,12 @@ class DocumentService:
             system_filters["folder_name"] = folder_name
         if end_user_id:
             system_filters["end_user_id"] = end_user_id
+        if auth.organization_id: # Add organization_id to system_filters
+            system_filters["organization_id"] = auth.organization_id
 
         # Delegate to the GraphService
         return await self.graph_service.get_graph_visualization_data(
             graph_name=name,
-            auth=auth,
-            system_filters=system_filters,
+            auth=auth, # auth contains organization_id
+            system_filters=system_filters, # system_filters now contains organization_id
         )

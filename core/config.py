@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: Optional[str] = None
     ASSEMBLYAI_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
+    CLERK_SECRET_KEY: Optional[str] = None
 
     # API configuration
     HOST: str
@@ -171,6 +172,7 @@ def get_settings() -> Settings:
         "dev_entity_type": config["auth"].get("dev_entity_type", "developer"),
         "dev_entity_id": config["auth"].get("dev_entity_id", "dev_user"),
         "dev_permissions": config["auth"].get("dev_permissions", ["read", "write", "admin"]),
+        "CLERK_SECRET_KEY": os.environ.get("CLERK_SECRET_KEY", config["auth"].get("clerk_secret_key")),
     }
 
     # Only require JWT_SECRET_KEY in non-dev mode

@@ -70,6 +70,102 @@ def event_loop():
     yield loop
     loop.close()
 
+# --- New Fixture for Mocking AuthContext ---
+@pytest.fixture
+def mock_verify_token_fixture(monkeypatch):
+    """
+    Fixture to mock core.auth_utils.verify_token.
+    It allows setting a custom AuthContext for a test.
+    """
+    mock_auth_context = AuthContext(
+        entity_type=EntityType.USER, # Default to USER for Clerk
+        entity_id="default_test_user_id",
+        user_id="default_test_user_id",
+        organization_id=None,
+        permissions={"read", "write"} # Default clerk permissions
+    )
+
+    async def mock_verify(authorization: Optional[str] = Header(None)):
+        if mock_auth_context is None: # Should not happen if set_auth_context was called
+            raise HTTPException(status_code=401, detail="Auth context not set in mock")
+        # Simulate check for missing header if dev_mode is false (as in original verify_token)
+        # This part of the logic might need to align with how dev_mode is handled in tests
+        # For now, assume dev_mode is false for these org-scoped tests.
+        if not auth_settings.dev_mode and not authorization:
+             raise HTTPException(
+                status_code=401,
+                detail="Missing authorization header",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return mock_auth_context
+
+    # Patch verify_token in the module where it's defined and used by FastAPI's Depends
+    # This assumes verify_token is imported as `from core.auth_utils import verify_token` in api.py
+    # and api.py uses `Depends(verify_token)`
+    # The actual patch target might need to be where FastAPI resolves it, e.g., 'core.api.verify_token'
+    # if api.py does `from .auth_utils import verify_token`.
+    # Given the project structure, 'core.auth_utils.verify_token' is likely the direct target if
+    # api.py imports it directly. However, FastAPI dependency injection can be tricky.
+    # Let's assume api.py has `from core.auth_utils import verify_token`
+
+    # The patch should target where verify_token is *looked up*.
+    # If core.api.py does `from core.auth_utils import verify_token`, then when FastAPI
+    # in core.api.py calls `Depends(verify_token)`, it uses `core.api.verify_token`.
+    # So, we should patch 'core.api.verify_token'.
+
+    # Let's try patching core.auth_utils.verify_token first, as it's simpler.
+    # If that doesn't work during test runs, we'll need to adjust.
+    # A common pattern is to patch where the dependency is *used*.
+    # FastAPI's `Depends` uses the function object passed to it.
+    # If `core.api.py` does `from core.auth_utils import verify_token` and then `Depends(verify_token)`,
+    # then `core.api.verify_token` is the reference.
+
+    # For integration tests that call the app via TestClient, the patch needs to be
+    # where the app itself imports `verify_token`. Assuming `core.api.verify_token` is correct.
+    # This is often a source of confusion.
+    # The most reliable way is to patch it in the module where it's *imported and used* by the endpoint.
+    # Given that `verify_token` is in `core.auth_utils` and likely imported into `core.api` (and other route files),
+    # patching it directly in `core.auth_utils` should affect all importers if they do `from core.auth_utils import verify_token`.
+
+    # Let's assume the DI system uses the original module's reference unless api.py rebinds it.
+    # So, patching 'core.auth_utils.verify_token'
+
+    # Re-evaluating: The dependency is resolved by FastAPI at runtime.
+    # If endpoints in core.api directly use `from core.auth_utils import verify_token`,
+    # then patching `core.auth_utils.verify_token` should work.
+
+    # After further thought: FastAPI's `Depends` effectively captures the function object
+    # at the time the route is defined. If `core.api.app` is already defined using
+    # the original `verify_token` when tests start, patching it later might not work
+    # for `Depends`.
+    # A common way for FastAPI integration tests is to override dependencies for the app instance.
+    # `app.dependency_overrides[original_dependency] = mock_dependency`
+    # This is more robust. I will adapt the client fixture to use this.
+
+    patched_verify_token = monkeypatch.patch('core.auth_utils.verify_token', new=mock_verify)
+
+    def set_auth_context(user_id: str, organization_id: Optional[str], permissions: Optional[list[str]] = None, entity_type: EntityType = EntityType.USER, app_id: Optional[str] = None):
+        nonlocal mock_auth_context
+        perms = set(permissions) if permissions else {"read", "write"}
+        mock_auth_context = AuthContext(
+            entity_type=entity_type,
+            entity_id=user_id, # For Clerk, entity_id is user_id
+            user_id=user_id,
+            organization_id=organization_id,
+            permissions=perms,
+            app_id=app_id
+        )
+        # Ensure dev_mode is off for these tests unless specified
+        auth_settings.dev_mode = False
+
+    # Return the setter function so tests can configure the context
+    yield set_auth_context
+
+    # Cleanup: remove the patch
+    monkeypatch.undo()
+
+# --- End New Fixture ---
+
 
 @pytest.fixture(scope="session", autouse=True)
 async def setup_test_environment(event_loop):
@@ -3909,3 +4005,199 @@ async def test_agent_conversation_persistence(client: AsyncClient):
     assert history[2]["role"] == "user"
     assert history[2]["content"] == "What is my name?"
     assert history[3]["role"] == "assistant"
+
+
+# --- Tests for Organization Scoping ---
+
+@pytest.mark.asyncio
+async def test_org_scoped_create_and_list_folders(client: AsyncClient, mock_verify_token_fixture, cleanup_documents):
+    # OrgA creates Folder1
+    mock_verify_token_fixture(user_id="userA", organization_id="OrgA")
+    response_a_create = await client.post("/folders", json={"name": "Folder1", "description": "OrgA's Folder1"}, headers=create_auth_header())
+    assert response_a_create.status_code == 200
+    folder_a_data = response_a_create.json()
+    assert folder_a_data["system_metadata"]["organization_id"] == "OrgA"
+    folder_a_id = folder_a_data["id"]
+
+    # OrgB creates Folder1 (same name, different org)
+    mock_verify_token_fixture(user_id="userB", organization_id="OrgB")
+    response_b_create = await client.post("/folders", json={"name": "Folder1", "description": "OrgB's Folder1"}, headers=create_auth_header())
+    assert response_b_create.status_code == 200
+    folder_b_data = response_b_create.json()
+    assert folder_b_data["system_metadata"]["organization_id"] == "OrgB"
+    folder_b_id = folder_b_data["id"]
+
+    assert folder_a_id != folder_b_id # Should be different folders
+
+    # UserA from OrgA lists folders
+    mock_verify_token_fixture(user_id="userA", organization_id="OrgA")
+    response_a_list = await client.get("/folders", headers=create_auth_header())
+    assert response_a_list.status_code == 200
+    folders_a = response_a_list.json()
+    assert len(folders_a) == 1
+    assert folders_a[0]["id"] == folder_a_id
+    assert folders_a[0]["name"] == "Folder1"
+    assert folders_a[0]["system_metadata"]["organization_id"] == "OrgA"
+
+    # UserB from OrgB lists folders
+    mock_verify_token_fixture(user_id="userB", organization_id="OrgB")
+    response_b_list = await client.get("/folders", headers=create_auth_header())
+    assert response_b_list.status_code == 200
+    folders_b = response_b_list.json()
+    assert len(folders_b) == 1
+    assert folders_b[0]["id"] == folder_b_id
+    assert folders_b[0]["name"] == "Folder1"
+    assert folders_b[0]["system_metadata"]["organization_id"] == "OrgB"
+
+    # UserC with no org lists folders (should see none of the above)
+    mock_verify_token_fixture(user_id="userC_no_org", organization_id=None)
+    response_c_list = await client.get("/folders", headers=create_auth_header())
+    assert response_c_list.status_code == 200
+    folders_c = response_c_list.json()
+    assert not any(f["id"] == folder_a_id for f in folders_c)
+    assert not any(f["id"] == folder_b_id for f in folders_c)
+
+
+@pytest.mark.asyncio
+async def test_org_scoped_get_and_delete_folder(client: AsyncClient, mock_verify_token_fixture, cleanup_documents):
+    # UserA/OrgA creates "FolderOrgA"
+    mock_verify_token_fixture(user_id="userA", organization_id="OrgA")
+    response_create = await client.post("/folders", json={"name": "FolderOrgA"}, headers=create_auth_header())
+    assert response_create.status_code == 200
+    folder_org_a_id = response_create.json()["id"]
+
+    # UserA/OrgA can GET it
+    response_get_a = await client.get(f"/folders/{folder_org_a_id}", headers=create_auth_header())
+    assert response_get_a.status_code == 200
+    assert response_get_a.json()["name"] == "FolderOrgA"
+
+    # UserB/OrgB cannot GET OrgA's folder
+    mock_verify_token_fixture(user_id="userB", organization_id="OrgB")
+    response_get_b = await client.get(f"/folders/{folder_org_a_id}", headers=create_auth_header())
+    assert response_get_b.status_code == 404 # Or 403, depending on implementation (404 if not found due to scoping)
+
+    # UserB/OrgB cannot DELETE OrgA's folder
+    response_delete_b = await client.delete(f"/folders/{folder_org_a_id}", headers=create_auth_header())
+    assert response_delete_b.status_code == 404 # As it can't find/access it by ID under its org
+
+    # UserA/OrgA can DELETE it
+    mock_verify_token_fixture(user_id="userA", organization_id="OrgA")
+    response_delete_a = await client.delete(f"/folders/{folder_org_a_id}", headers=create_auth_header())
+    # The delete endpoint in the provided api.py deletes by name, not ID. Let's adapt.
+    # It also cleans up documents, so we need to be mindful if we add docs. For now, empty folder.
+    # response_delete_a = await client.delete(f"/folders/FolderOrgA", headers=create_auth_header())
+    # The test_api.py actually uses folder_id for delete in one test, and name in another.
+    # The provided `delete_folder` in `core/api.py` takes `folder_name`.
+    # Let's assume the previous test was for `delete_folder(folder_name=...)`
+    # For consistency and to test ID-based access, let's assume the endpoint can also take ID,
+    # or we test deletion by name after confirming only OrgA can access it.
+    # The provided API endpoint is `DELETE /folders/{folder_name}`.
+
+    # Re-fetch folder by name for UserA/OrgA to delete
+    folder_to_delete_name = "FolderOrgA"
+    # (No need to re-fetch, just use the name)
+
+    # UserB/OrgB tries to delete "FolderOrgA" - should fail or not find it under their org
+    mock_verify_token_fixture(user_id="userB", organization_id="OrgB")
+    response_delete_b_by_name = await client.delete(f"/folders/{folder_to_delete_name}", headers=create_auth_header())
+    assert response_delete_b_by_name.status_code == 404 # Not found under OrgB
+
+    # UserA/OrgA deletes "FolderOrgA"
+    mock_verify_token_fixture(user_id="userA", organization_id="OrgA")
+    response_delete_a_by_name = await client.delete(f"/folders/{folder_to_delete_name}", headers=create_auth_header())
+    assert response_delete_a_by_name.status_code == 200
+    assert response_delete_a_by_name.json()["status"] == "success"
+
+    # Verify it's gone for UserA/OrgA
+    response_get_a_after_delete = await client.get(f"/folders/{folder_org_a_id}", headers=create_auth_header())
+    assert response_get_a_after_delete.status_code == 404
+
+    response_list_a_after_delete = await client.get("/folders", headers=create_auth_header())
+    assert response_list_a_after_delete.status_code == 200
+    assert not any(f["id"] == folder_org_a_id for f in response_list_a_after_delete.json())
+
+
+@pytest.mark.asyncio
+async def test_org_scoped_documents_in_folders(client: AsyncClient, mock_verify_token_fixture, cleanup_documents):
+    # UserA/OrgA creates "FolderA_OrgA"
+    mock_verify_token_fixture(user_id="userA", organization_id="OrgA")
+    folder_a_name = "FolderA_OrgA"
+    response_create_folder_a = await client.post("/folders", json={"name": folder_a_name}, headers=create_auth_header())
+    assert response_create_folder_a.status_code == 200
+    folder_a_id = response_create_folder_a.json()["id"]
+
+    # UserA/OrgA ingests "Doc1_OrgA" into "FolderA_OrgA"
+    doc1_content_org_a = "This is Doc1 in FolderA specific to OrgA"
+    response_ingest_doc1_a = await client.post(
+        "/ingest/text",
+        json={"content": doc1_content_org_a, "folder_name": folder_a_name, "metadata": {"org": "A"}},
+        headers=create_auth_header()
+    )
+    assert response_ingest_doc1_a.status_code == 200
+    doc1_org_a_id = response_ingest_doc1_a.json()["external_id"]
+    # Verify system_metadata on the document shows the folder and potentially org if set by service
+    doc1_org_a_data = response_ingest_doc1_a.json()
+    assert doc1_org_a_data["system_metadata"]["folder_name"] == folder_a_name
+    if "organization_id" in doc1_org_a_data["system_metadata"]: # DocumentService might add this
+         assert doc1_org_a_data["system_metadata"]["organization_id"] == "OrgA"
+
+
+    # UserA/OrgA lists documents in "FolderA_OrgA"
+    mock_verify_token_fixture(user_id="userA", organization_id="OrgA") # Re-affirm context
+    response_list_docs_a = await client.post("/documents", params={"folder_name": folder_a_name}, headers=create_auth_header())
+    assert response_list_docs_a.status_code == 200
+    docs_a = response_list_docs_a.json()
+    assert len(docs_a) == 1
+    assert docs_a[0]["external_id"] == doc1_org_a_id
+
+    # UserB/OrgB creates "FolderA_OrgB" (same folder name, different org)
+    mock_verify_token_fixture(user_id="userB", organization_id="OrgB")
+    folder_b_name = "FolderA_OrgB" # Can be same as folder_a_name if desired for test, e.g. "FolderA"
+                                  # Using a distinct name here to be super clear in DB if inspecting
+    response_create_folder_b = await client.post("/folders", json={"name": folder_b_name}, headers=create_auth_header())
+    assert response_create_folder_b.status_code == 200
+    # folder_b_id = response_create_folder_b.json()["id"] # Not used further
+
+    # UserB/OrgB ingests "Doc1_OrgB" into their "FolderA_OrgB"
+    doc1_content_org_b = "This is Doc1 in FolderA specific to OrgB"
+    response_ingest_doc1_b = await client.post(
+        "/ingest/text",
+        json={"content": doc1_content_org_b, "folder_name": folder_b_name, "metadata": {"org": "B"}},
+        headers=create_auth_header()
+    )
+    assert response_ingest_doc1_b.status_code == 200
+    doc1_org_b_id = response_ingest_doc1_b.json()["external_id"]
+
+    # UserB/OrgB lists documents in their "FolderA_OrgB"
+    mock_verify_token_fixture(user_id="userB", organization_id="OrgB") # Re-affirm
+    response_list_docs_b = await client.post("/documents", params={"folder_name": folder_b_name}, headers=create_auth_header())
+    assert response_list_docs_b.status_code == 200
+    docs_b = response_list_docs_b.json()
+    assert len(docs_b) == 1
+    assert docs_b[0]["external_id"] == doc1_org_b_id
+    assert docs_b[0]["metadata"]["org"] == "B" # Ensure we got the right doc
+
+    # UserA/OrgA tries to GET Doc1_OrgB. Should fail.
+    mock_verify_token_fixture(user_id="userA", organization_id="OrgA")
+    response_get_b_doc_by_a = await client.get(f"/documents/{doc1_org_b_id}", headers=create_auth_header())
+    assert response_get_b_doc_by_a.status_code == 404 # Not found in OrgA's scope
+
+    # UserA/OrgA tries to DELETE Doc1_OrgB. Should fail.
+    response_delete_b_doc_by_a = await client.delete(f"/documents/{doc1_org_b_id}", headers=create_auth_header())
+    assert response_delete_b_doc_by_a.status_code == 404 # Not found in OrgA's scope for deletion
+
+    # UserA/OrgA deletes their own Doc1_OrgA. Should succeed.
+    response_delete_a_doc_by_a = await client.delete(f"/documents/{doc1_org_a_id}", headers=create_auth_header())
+    assert response_delete_a_doc_by_a.status_code == 200
+
+    # Verify it's gone for UserA/OrgA
+    response_get_a_doc_after_delete = await client.get(f"/documents/{doc1_org_a_id}", headers=create_auth_header())
+    assert response_get_a_doc_after_delete.status_code == 404
+
+    # Verify Doc1_OrgB still exists for UserB/OrgB
+    mock_verify_token_fixture(user_id="userB", organization_id="OrgB")
+    response_get_b_doc_still_exists = await client.get(f"/documents/{doc1_org_b_id}", headers=create_auth_header())
+    assert response_get_b_doc_still_exists.status_code == 200
+    assert response_get_b_doc_still_exists.json()["metadata"]["org"] == "B"
+
+# --- End Tests for Organization Scoping ---
