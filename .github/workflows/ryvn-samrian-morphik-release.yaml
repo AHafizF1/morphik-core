@@ -34,6 +34,19 @@ jobs:
       - name: Install Ryvn CLI
         uses: ryvn-technologies/install-ryvn-cli@v1.0.0
 
+      - name: Clean up disk space
+        run: |
+          # Clean up Docker resources
+          docker system prune -af
+          docker builder prune -af
+          
+          # Clean up apt cache
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          
+          # Check disk space
+          df -h
+
       - name: Generate Release Tag
         id: generate-tag
         env:
