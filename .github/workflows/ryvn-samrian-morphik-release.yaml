@@ -34,19 +34,20 @@ jobs:
       - name: Install Ryvn CLI
         uses: ryvn-technologies/install-ryvn-cli@v1.0.0
 
-      - name: Clean up disk space
+      - name: Free up disk space
         run: |
-          # Stop any running containers
-          docker ps -aq | xargs -r docker stop || true
-          docker ps -aq | xargs -r docker rm -f || true
+          # Remove unused system packages
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
           
-          # Remove all unused Docker resources
-          docker system prune -a --volumes --force
+          # Clean Docker
+          docker system prune -af
           docker builder prune -a --force
           
-          # Clean up apt cache and temporary files
+          # Clean apt cache and temporary files
           sudo apt-get clean -y
-          sudo apt-get autoremove -y
           sudo rm -rf /var/lib/apt/lists/*
           sudo rm -rf /tmp/*
           sudo rm -rf /var/tmp/*
