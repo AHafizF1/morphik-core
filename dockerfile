@@ -105,6 +105,7 @@ ENV PATH="/app/.venv/bin:/usr/local/bin:${PATH}"
 COPY morphik.docker.toml /app/morphik.toml.default
 
 # Create startup script
+# (Inside your Dockerfile)
 RUN echo '#!/bin/bash\n\
 set -e\n\
 \n\
@@ -113,41 +114,34 @@ if [ ! -f /app/morphik.toml ]; then\n\
     cp /app/morphik.toml.default /app/morphik.toml\n\
 fi\n\
 \n\
-# Function to check PostgreSQL\n\
+# Function to check PostgreSQL using the full URI\n\
 check_postgres() {\n\
     if [ -n "$POSTGRES_URI" ]; then\n\
-        echo "Waiting for PostgreSQL..."\n\
+        echo "Waiting for PostgreSQL using the connection URI..."\n\
         max_retries=30\n\
         retries=0\n\
-        until PGPASSWORD=$PGPASSWORD pg_isready -h postgres -U morphik -d morphik; do\n\
+        # Use the full URI directly with pg_isready. This is the key change.\n\
+        until pg_isready -d "$POSTGRES_URI" -t 5; do\n\
             retries=$((retries + 1))\n\
             if [ $retries -eq $max_retries ]; then\n\
-                echo "Error: PostgreSQL did not become ready in time"\n\
+                echo "Error: PostgreSQL did not become ready in time."\n\
                 exit 1\n\
             fi\n\
             echo "Waiting for PostgreSQL... (Attempt $retries/$max_retries)"\n\
             sleep 2\n\
         done\n\
         echo "PostgreSQL is ready!"\n\
-        \n\
-        # Verify database connection\n\
-        if ! PGPASSWORD=$PGPASSWORD psql -h postgres -U morphik -d morphik -c "SELECT 1" > /dev/null 2>&1; then\n\
-            echo "Error: Could not connect to PostgreSQL database"\n\
-            exit 1\n\
-        fi\n\
-        echo "PostgreSQL connection verified!"\n\
     fi\n\
 }\n\
 \n\
 # Check PostgreSQL\n\
 check_postgres\n\
 \n\
-# Check if command arguments were passed ($# is the number of arguments)\n\
+# Check if command arguments were passed\n\
 if [ $# -gt 0 ]; then\n\
-    # If arguments exist, execute them (e.g., execute "arq core.workers...")\n\
     exec "$@"\n\
 else\n\
-    # Otherwise, execute the default command (uv run start_server.py)\n\
+    # Execute the default command\n\
     exec uv run uvicorn core.api:app --host $HOST --port $PORT --loop asyncio --http auto --ws auto --lifespan auto\n\
 fi\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
