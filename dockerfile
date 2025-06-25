@@ -73,6 +73,7 @@ RUN apt-get update && apt-get install -y \
     libmagic1 \
     tesseract-ocr \
     postgresql-client \
+    libpq-dev \
     poppler-utils \
     gcc \
     g++ \
