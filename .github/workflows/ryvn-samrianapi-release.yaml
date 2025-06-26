@@ -34,6 +34,33 @@ jobs:
       - name: Install Ryvn CLI
         uses: ryvn-technologies/install-ryvn-cli@v1.0.0
 
+      - name: Free up disk space
+        run: |
+          # Remove unused system packages
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          
+          # Clean Docker
+          docker system prune -af
+          docker builder prune -a --force
+          
+          # Clean apt cache and temporary files
+          sudo apt-get clean -y
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /tmp/*
+          sudo rm -rf /var/tmp/*
+          
+          # Clean up any old logs
+          sudo find /var/log -type f -name "*.log" -exec truncate -s 0 {} \;
+          
+          # Check disk space
+          echo "=== Disk space before build ==="
+          df -h
+          echo "=== Largest directories ==="
+          sudo du -h --max-depth=1 / | sort -hr | head -n 10
+
       - name: Generate Release Tag
         id: generate-tag
         env:
