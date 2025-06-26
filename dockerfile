@@ -41,12 +41,10 @@ RUN --mount=type=cache,target=${UV_CACHE_DIR} \
 # Copy the rest of the application code
 # Assuming start_server.py is at the root or handled by pyproject.toml structure.
 COPY . .
-
 # Install the project itself into the venv in non-editable mode
 # Cache buster: 1 - verbose flag added
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv sync --verbose --locked --no-editable
-
 # Install additional packages as requested
 # Cache buster: 1 - verbose flag added
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
@@ -104,7 +102,8 @@ ENV PATH="/app/.venv/bin:/usr/local/bin:${PATH}"
 # Create default configuration
 COPY morphik.docker.toml /app/morphik.toml.default
 
-# Create startup script
+# Create startup script with corrected logic
+# Create startup script 
 # (Inside your Dockerfile)
 RUN echo '#!/bin/bash\n\
 set -e\n\
@@ -114,20 +113,27 @@ if [ ! -f /app/morphik.toml ]; then\n\
     cp /app/morphik.toml.default /app/morphik.toml\n\
 fi\n\
 \n\
-# Function to check PostgreSQL using the full URI\n\
+# Function to check PostgreSQL\n\
 check_postgres() {\n\
     if [ -n "$POSTGRES_URI" ]; then\n\
-        echo "Waiting for PostgreSQL using the connection URI..."\n\
+        echo "Waiting for PostgreSQL..."\n\
+        \n\
+        # Sanitize the URI for the pg_isready check by removing the driver specifier.\n\
+        # The main app will still use the original, unmodified $POSTGRES_URI.\n\
+        CLEAN_URI=$(echo "$POSTGRES_URI" | sed "s/+asyncpg//")\n\
+        \n\
         max_retries=30\n\
         retries=0\n\
-        # Use the full URI directly with pg_isready. This is the key change.\n\
-        until pg_isready -d "$POSTGRES_URI" -t 5; do\n\
+        # Use the CLEAN_URI for the pg_isready check\n\
+        until pg_isready -d "$CLEAN_URI" -t 5; do\n\
             retries=$((retries + 1))\n\
-            if [ $retries -eq $max_retries ]; then\n\
+            if [ $retries -ge $max_retries ]; then\n\
                 echo "Error: PostgreSQL did not become ready in time."\n\
+                # Attempt one last time and show error for debugging\n\
+                pg_isready -d "$CLEAN_URI" -t 1 || true \n\
                 exit 1\n\
             fi\n\
-            echo "Waiting for PostgreSQL... (Attempt $retries/$max_retries)"\n\
+            echo "Waiting for PostgreSQL... (Attempt $((retries+1))/$max_retries)"\n\
             sleep 2\n\
         done\n\
         echo "PostgreSQL is ready!"\n\
@@ -145,6 +151,7 @@ else\n\
     exec uv run uvicorn core.api:app --host $HOST --port $PORT --loop asyncio --http auto --ws auto --lifespan auto\n\
 fi\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+# ===================== MODIFIED SECTION END =====================
 
 # Copy application code
 # pyproject.toml is needed for uv to identify the project context for `uv run`
