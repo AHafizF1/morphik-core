@@ -269,6 +269,14 @@ async def process_ingestion_job(
 
         parse_start = time.time()
         additional_metadata, text = await document_service.parser.parse_file_to_text(file_content, parse_filename)
+        # Clean the extracted text to remove problematic escape characters (e.g., null bytes)
+        # PostgreSQL does not allow \x00 (null byte) or \u0000 in text fields
+        import re
+
+        text = re.sub(r"[\x00\u0000]", "", text)
+        # Optionally, remove other non-printable or control characters except newlines/tabs
+        text = re.sub(r"[^\x09\x0A\x0D\x20-\x7E]", "", text)
+
         logger.debug(f"Parsed file into text of length {len(text)} (filename used: {parse_filename})")
         parse_time = time.time() - parse_start
         phase_times["parse_file"] = parse_time
@@ -574,6 +582,23 @@ async def process_ingestion_job(
 
         logger.debug(f"Successfully completed processing for document {doc.external_id}")
 
+        # 12. Add document to folder (this will queue workflows but not execute them)
+        if folder_name:
+            try:
+                logger.info(f"Adding document {doc.external_id} to folder '{folder_name}'")
+                await document_service._ensure_folder_exists(folder_name, doc.external_id, auth)
+            except Exception as folder_exc:
+                logger.error(f"Failed to add document to folder: {folder_exc}")
+                # Don't fail the entire ingestion if folder processing fails
+
+        # 13. Execute any pending workflows now that document processing is complete
+        try:
+            logger.info(f"Executing pending workflows for document {doc.external_id}")
+            await document_service.execute_pending_workflows(doc.external_id, auth)
+        except Exception as workflow_exc:
+            logger.error(f"Failed to execute pending workflows: {workflow_exc}")
+            # Don't fail ingestion if workflow execution fails
+
         # 13. Log successful completion
         logger.info(f"Successfully completed ingestion for {original_filename}, document ID: {doc.external_id}")
         # Performance summary
@@ -612,7 +637,10 @@ async def process_ingestion_job(
 
     except Exception as e:
         # ... (rest of the function remains the same)
+        import traceback
+
         logger.error(f"Error processing ingestion job for file {original_filename}: {str(e)}")
+        logger.error(traceback.format_exc())
 
         # ------------------------------------------------------------------
         # Ensure we update the *per-app* database where the document lives.
