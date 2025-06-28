@@ -11,13 +11,14 @@ WORKDIR /app
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
+    curl \
     gcc \
     g++ \
     cmake \
     python3-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
-
+    
 # Install Rust using the simpler method
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 # Activating cargo env for this RUN instruction and subsequent ones in this stage.
