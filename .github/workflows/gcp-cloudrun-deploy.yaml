@@ -1,0 +1,116 @@
+name: 🚀 Deploy to GCP Cloud Run
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+    paths:
+      - "**"
+      - ".github/workflows/gcp-cloudrun-deploy.yaml"
+  pull_request:
+    branches:
+      - "main"
+    paths:
+      - "**"
+
+env:
+  SERVICE_NAME: morphik-core
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_REGION: us-central1  # Change to your preferred region
+  ARTIFACT_REGISTRY: ${{ format('{0}-docker.pkg.dev/{1}/{2}', GCP_REGION, env.GCP_PROJECT_ID, 'morphik') }}
+  IMAGE_NAME: ${{ format('{0}/{1}:{2}', env.ARTIFACT_REGISTRY, env.SERVICE_NAME, github.sha) }}
+
+jobs:
+  build-and-deploy:
+    name: 🛠️ Build and Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: 🔄 Checkout code
+        uses: actions/checkout@v4
+
+      - name: ☁️ Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: 🐳 Configure Docker for Google Artifact Registry
+        run: |
+          gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+
+      - name: 🧹 Free up disk space
+        run: |
+          # Remove unused system packages
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          
+          # Clean Docker
+          docker system prune -af
+          docker builder prune -a --force
+          
+          # Clean apt cache and temporary files
+          sudo apt-get clean -y
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /tmp/*
+          sudo rm -rf /var/tmp/*
+          
+          # Clean up any old logs
+          sudo find /var/log -type f -name "*.log" -exec truncate -s 0 {} \;
+          
+          # Check disk space
+          echo "=== Disk space before build ==="
+          df -h
+          echo "=== Largest directories ==="
+          sudo du -h --max-depth=1 / | sort -hr | head -n 10
+
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🏗️ Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_NAME }}
+          cache-from: type=gha
+          cache-to: type=ghac,mode=max
+
+      - name: 🚀 Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.IMAGE_NAME }}
+          env_vars: |
+            ENVIRONMENT=production
+            POSTGRES_URI=${{ secrets.POSTGRES_URI }}
+            JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+            # Add other environment variables as needed
+          secrets: |
+            # Reference secrets from Secret Manager
+            # DATABASE_URL=projects/${{ env.GCP_PROJECT_ID }}/secrets/DB_CONNECTION_STRING:latest
+          flags: --allow-unauthenticated --platform=managed --port=8000 --memory=1Gi --cpu=1 --concurrency=80 --timeout=300s
+
+      - name: 🌐 Show Cloud Run URL
+        run: |
+          echo "\n🚀 Deployment successful!"
+          echo "🌐 Cloud Run URL: ${{ steps.deploy.outputs.url }}"
+          echo "🔗 Service: ${{ env.SERVICE_NAME }}"
+          echo "🌍 Region: ${{ env.GCP_REGION }}"
+
+      # Uncomment to enable domain mapping if you have a custom domain
+      # - name: Map Domain to Cloud Run Service
+      #   run: |
+      #     gcloud run domain-mappings create --service ${{ env.SERVICE_NAME }} \
+      #       --domain your-domain.com \
+      #       --region ${{ env.GCP_REGION }} --project ${{ env.GCP_PROJECT_ID }}
