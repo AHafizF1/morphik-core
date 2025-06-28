@@ -107,10 +107,3 @@ jobs:
           echo "🌐 Cloud Run URL: ${{ steps.deploy.outputs.url }}"
           echo "🔗 Service: ${{ env.SERVICE_NAME }}"
           echo "🌍 Region: ${{ env.GCP_REGION }}"
-
-      # Uncomment to enable domain mapping if you have a custom domain
-      # - name: Map Domain to Cloud Run Service
-      #   run: |
-      #     gcloud run domain-mappings create --service ${{ env.SERVICE_NAME }} \
-      #       --domain your-domain.com \
-      #       --region ${{ env.GCP_REGION }} --project ${{ env.GCP_PROJECT_ID }}
