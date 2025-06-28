@@ -18,8 +18,9 @@ env:
   SERVICE_NAME: morphik-core
   GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   GCP_REGION: us-central1  # Change to your preferred region
-  ARTIFACT_REGISTRY: ${{ format('{0}-docker.pkg.dev/{1}/{2}', 'us-central1', secrets.GCP_PROJECT_ID, 'morphik') }}
-  IMAGE_NAME: ${{ format('{0}/{1}:{2}', env.ARTIFACT_REGISTRY, 'morphik-core', github.sha) }}
+  # Pre-calculated values for better compatibility
+  ARTIFACT_REGISTRY: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/morphik
+  IMAGE_NAME: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/morphik/morphik-core:${{ github.sha }}
 
 jobs:
   build-and-deploy:
