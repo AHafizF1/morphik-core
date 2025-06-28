@@ -83,7 +83,7 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}
           cache-from: type=gha
-          cache-to: type=ghac,mode=max
+          cache-to: type=gha,mode=max
 
       - name: 🚀 Deploy to Cloud Run
         id: deploy
