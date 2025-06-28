@@ -100,9 +100,6 @@ jobs:
             POSTGRES_URI=${{ secrets.POSTGRES_URI }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             # Add other environment variables as needed
-          secrets: |
-            # Reference secrets from Secret Manager
-            # DATABASE_URL=projects/${{ env.GCP_PROJECT_ID }}/secrets/DB_CONNECTION_STRING:latest
           flags: --allow-unauthenticated --platform=managed --port=8000 --memory=16Gi --cpu=6 --concurrency=80 --timeout=300s
 
       - name: 🌐 Show Cloud Run URL
