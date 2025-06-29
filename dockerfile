@@ -18,11 +18,22 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
-    
+
 # Install Rust using the simpler method
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 # Activating cargo env for this RUN instruction and subsequent ones in this stage.
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# ==================== MODIFIED SECTION START ====================
+# Install Ollama CLI tool
+RUN curl -fsSL https://ollama.com/install.sh | sh
+
+# Pre-download Ollama models to bake them into the image.
+# This runs the Ollama server temporarily to fetch the models.
+RUN ollama pull qwen2.5vl:latest && \
+    ollama pull llama3.2-vision && \
+    ollama pull nomic-embed-text
+# ===================== MODIFIED SECTION END =====================
 
 # Set uv environment variables
 ENV UV_LINK_MODE=copy
@@ -33,30 +44,25 @@ ENV PATH="/app/.venv/bin:${PATH}"
 # Copy project definition and lock file
 COPY pyproject.toml uv.lock ./
 
-# Create venv and install dependencies from lockfile (excluding the project itself initially for better caching)
-# This also creates the /app/.venv directory
-# Cache buster: 1 - verbose flag added
+# Create venv and install dependencies from lockfile
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv sync --verbose --locked --no-install-project
 
 # Copy the rest of the application code
-# Assuming start_server.py is at the root or handled by pyproject.toml structure.
 COPY . .
-# Install the project itself into the venv in non-editable mode
-# Cache buster: 1 - verbose flag added
+# Install the project itself into the venv
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv sync --verbose --locked --no-editable
 # Install additional packages as requested
-# Cache buster: 1 - verbose flag added
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv pip install --verbose 'colpali-engine@git+https://github.com/illuin-tech/colpali@80fb72c9b827ecdb5687a3a8197077d0d01791b3'
 
-# Cache buster: 1 - verbose flag already present
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv pip install --upgrade --verbose --force-reinstall --no-cache-dir llama-cpp-python==0.3.5
 
 # Download NLTK data
 RUN python -m nltk.downloader -d /usr/local/share/nltk_data punkt averaged_perceptron_tagger
+
 
 # Production stage
 FROM python:3.11.12-slim
@@ -90,6 +96,9 @@ COPY --from=builder /bin/uvx /bin/uvx
 # Copy NLTK data from builder
 COPY --from=builder /usr/local/share/nltk_data /usr/local/share/nltk_data
 
+# Copy the pre-downloaded Ollama models from the builder stage
+COPY --from=builder /root/.ollama /root/.ollama
+
 # Create necessary directories
 RUN mkdir -p storage logs
 
@@ -99,38 +108,30 @@ ENV HOST=0.0.0.0
 ENV PORT=8000
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:/usr/local/bin:${PATH}"
+# Point Ollama to the location of the baked-in models
+ENV OLLAMA_MODELS=/root/.ollama
 
 # Create default configuration
 COPY morphik.docker.toml /app/morphik.toml.default
 
-# Create startup script with corrected logic
-# Create startup script 
-# (Inside your Dockerfile)
+# Create startup script
 RUN echo '#!/bin/bash\n\
 set -e\n\
 \n\
-# Copy default config if none exists\n\
 if [ ! -f /app/morphik.toml ]; then\n\
     cp /app/morphik.toml.default /app/morphik.toml\n\
 fi\n\
 \n\
-# Function to check PostgreSQL\n\
 check_postgres() {\n\
     if [ -n "$POSTGRES_URI" ]; then\n\
         echo "Waiting for PostgreSQL..."\n\
-        \n\
-        # Sanitize the URI for the pg_isready check by removing the driver specifier.\n\
-        # The main app will still use the original, unmodified $POSTGRES_URI.\n\
         CLEAN_URI=$(echo "$POSTGRES_URI" | sed "s/+asyncpg//")\n\
-        \n\
         max_retries=30\n\
         retries=0\n\
-        # Use the CLEAN_URI for the pg_isready check\n\
         until pg_isready -d "$CLEAN_URI" -t 5; do\n\
             retries=$((retries + 1))\n\
             if [ $retries -ge $max_retries ]; then\n\
                 echo "Error: PostgreSQL did not become ready in time."\n\
-                # Attempt one last time and show error for debugging\n\
                 pg_isready -d "$CLEAN_URI" -t 1 || true \n\
                 exit 1\n\
             fi\n\
@@ -141,26 +142,20 @@ check_postgres() {\n\
     fi\n\
 }\n\
 \n\
-# Check PostgreSQL\n\
 check_postgres\n\
 \n\
-# Check if command arguments were passed\n\
 if [ $# -gt 0 ]; then\n\
     exec "$@"\n\
 else\n\
-    # Execute the default command\n\
     exec uv run uvicorn core.api:app --host $HOST --port $PORT --loop asyncio --http auto --ws auto --lifespan auto\n\
 fi\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
-# ===================== MODIFIED SECTION END =====================
 
 # Copy application code
-# pyproject.toml is needed for uv to identify the project context for `uv run`
 COPY pyproject.toml ./
 COPY core ./core
 COPY ee ./ee
 COPY README.md LICENSE ./
-# Assuming start_server.py is at the root of your project
 COPY start_server.py ./
 
 # Labels for the image
