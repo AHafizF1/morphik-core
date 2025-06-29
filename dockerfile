@@ -19,16 +19,12 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust using the simpler method
+# Install Rust
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
-# Activating cargo env for this RUN instruction and subsequent ones in this stage.
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Install Ollama CLI tool
+# Install Ollama CLI and pre-download models
 RUN curl -fsSL https://ollama.com/install.sh | sh
-
-# Pre-download Ollama models by starting the server in the background,
-# pulling the models, and then stopping the server.
 RUN \
     ollama serve & \
     sleep 5 && \
@@ -46,19 +42,14 @@ ENV PATH="/app/.venv/bin:${PATH}"
 # Copy project definition and lock file
 COPY pyproject.toml uv.lock ./
 
-# Create venv and install dependencies from lockfile
+# Install Python dependencies
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv sync --verbose --locked --no-install-project
-
-# Copy the rest of the application code
 COPY . .
-# Install the project itself into the venv
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv sync --verbose --locked --no-editable
-# Install additional packages as requested
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv pip install --verbose 'colpali-engine@git+https://github.com/illuin-tech/colpali@80fb72c9b827ecdb5687a3a8197077d0d01791b3'
-
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv pip install --upgrade --verbose --force-reinstall --no-cache-dir llama-cpp-python==0.3.5
 
@@ -89,17 +80,14 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the virtual environment from the builder stage
+# Copy build artifacts from the builder stage
 COPY --from=builder /app/.venv /app/.venv
-# Copy uv binaries from the builder stage
 COPY --from=builder /bin/uv /bin/uv
 COPY --from=builder /bin/uvx /bin/uvx
-
-# Copy NLTK data from builder
 COPY --from=builder /usr/local/share/nltk_data /usr/local/share/nltk_data
-
-# Copy the pre-downloaded Ollama models from the builder stage
 COPY --from=builder /root/.ollama /root/.ollama
+# Also copy the ollama binary itself
+COPY --from=builder /usr/local/bin/ollama /usr/local/bin/ollama
 
 # Create necessary directories
 RUN mkdir -p storage logs
@@ -110,15 +98,21 @@ ENV HOST=0.0.0.0
 ENV PORT=8000
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:/usr/local/bin:${PATH}"
-# Point Ollama to the location of the baked-in models
 ENV OLLAMA_MODELS=/root/.ollama
 
 # Create default configuration
 COPY morphik.docker.toml /app/morphik.toml.default
 
-# Create startup script
+# ==================== MODIFIED SECTION START ====================
+# Create startup script that runs Ollama server AND the web app
 RUN echo '#!/bin/bash\n\
 set -e\n\
+\n\
+# Start the Ollama server in the background\n\
+echo "Starting Ollama server..."\n\
+ollama serve &\n\
+# Give it a moment to initialize\n\
+sleep 3\n\
 \n\
 if [ ! -f /app/morphik.toml ]; then\n\
     cp /app/morphik.toml.default /app/morphik.toml\n\
@@ -146,12 +140,15 @@ check_postgres() {\n\
 \n\
 check_postgres\n\
 \n\
+# Now start the main application in the foreground\n\
+echo "Starting Morphik web application..."\n\
 if [ $# -gt 0 ]; then\n\
     exec "$@"\n\
 else\n\
     exec uv run uvicorn core.api:app --host $HOST --port $PORT --loop asyncio --http auto --ws auto --lifespan auto\n\
 fi\n\
 ' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+# ===================== MODIFIED SECTION END =====================
 
 # Copy application code
 COPY pyproject.toml ./
