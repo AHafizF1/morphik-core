@@ -24,16 +24,18 @@ RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 # Activating cargo env for this RUN instruction and subsequent ones in this stage.
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# ==================== MODIFIED SECTION START ====================
 # Install Ollama CLI tool
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
-# Pre-download Ollama models to bake them into the image.
-# This runs the Ollama server temporarily to fetch the models.
-RUN ollama pull qwen2.5vl:latest && \
+# Pre-download Ollama models by starting the server in the background,
+# pulling the models, and then stopping the server.
+RUN \
+    ollama serve & \
+    sleep 5 && \
+    ollama pull qwen2.5vl:latest && \
     ollama pull llama3.2-vision && \
-    ollama pull nomic-embed-text
-# ===================== MODIFIED SECTION END =====================
+    ollama pull nomic-embed-text && \
+    pkill ollama
 
 # Set uv environment variables
 ENV UV_LINK_MODE=copy
